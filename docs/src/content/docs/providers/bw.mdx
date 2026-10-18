@@ -487,3 +487,19 @@ When `?server=` names a different server than the one the `bw` CLI is configured
 for, the operation stops before touching the vault and reports both addresses
 alongside the `bw logout` / `bw config server` / `bw login` / `bw unlock`
 sequence needed to correct it.
+
+## Selected UUID reads
+
+<VersionCompatibility version="0.22" />
+
+Opt into `bw://?lookup=id` for read-only access through exact item UUID references.
+Single and UUID-only batch reads call `bw get item <uuid>` rather than listing
+unrelated vault items. Names, organization/collection scope, writes and vault
+reflection are refused in this mode. A failed direct lookup returns the CLI error;
+it does not retry by name or list the vault. Existing `bw://` search, ambiguity,
+missing-item and batch behavior remains unchanged.
+
+This is a lookup policy, not narrower vault authorization: the native Bitwarden
+session still has its normal account permissions. Authentication remains owned
+by `bw`. To select a field, use the standard `refs` coordinate rather than smart
+field defaults. This mode needs its own attended provider acceptance before adoption.
