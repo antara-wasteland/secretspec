@@ -1,5 +1,8 @@
 //! Core secrets management functionality
 
+#[path = "inspection.rs"]
+pub mod inspection;
+
 use crate::audit::{AuditAction, AuditContext, AuditLogger, AuditOutcome, AuditPurpose};
 use crate::cache::{self, CacheEntryStatus, CacheOwnership};
 use crate::compiled_spec::{CompiledSpec, MissingPolicy};

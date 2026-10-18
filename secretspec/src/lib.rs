@@ -148,3 +148,8 @@ pub use validation::{ConstraintKind, ConstraintViolation, ValidatedSecrets, Vali
 
 #[cfg(test)]
 mod tests;
+
+pub use secrets::inspection::{
+    INSPECTION_SCHEMA_VERSION, InspectionAddress, InspectionCapabilities, InspectionRoute,
+    NamedInspection,
+};

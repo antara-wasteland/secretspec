@@ -302,3 +302,32 @@ to declare native retry ownership and mutation replay safety. The default reject
 mutation replay. Set the policy before first provider I/O and before sharing an
 `Arc` provider. See [transient failures](/concepts/providers/#transient-failures)
 for batching, authentication, and native SDK behavior.
+
+## Inspect one declaration without fetching values
+
+<VersionCompatibility version="0.22" />
+
+`Secrets::inspect_named(name)` uses the resolver's effective profile, scope,
+provider override and native-address planning without constructing providers,
+fetching credentials, unlocking storage, generating values or writing entries.
+It returns `None` for a name the session does not expose. The result excludes
+inline defaults, composition/generation templates and credential sources.
+
+```rust
+let mut session = secretspec::Secrets::load_from(std::path::Path::new("secretspec.toml"))?;
+session.set_provider("local");
+session.set_profile("default");
+if let Some(metadata) = session.inspect_named("API_TOKEN")? {
+    assert_eq!(metadata.schema_version, secretspec::INSPECTION_SCHEMA_VERSION);
+    // Inspect metadata.route without resolving API_TOKEN.
+}
+# Ok::<(), secretspec::SecretSpecError>(())
+```
+
+Addresses describe configured coordinates, not canonical backend identity or
+presence. Registered read/delete capabilities do not establish build availability,
+authorization or entry writability. External providers with no static registration
+report unknown capabilities. Inspection does not negotiate their live capabilities.
+Fallback/cache flags disclose potential additional effects; inspection does not
+walk fallbacks or inspect stored cache contents. This metadata is not an ownership
+or authorization grant and cannot prove that all external dependants are known.

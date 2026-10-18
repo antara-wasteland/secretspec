@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Rust SDK: inspect one selected declaration and its configured route without fetching secret values or constructing providers (0.22+).
+
 ### Added
 
 - Provider reads now retry recognized transient failures with bounded exponential
