@@ -396,6 +396,11 @@ pub struct BitwardenConfig {
     /// Default field name for storing values.
     /// Can be overridden by BITWARDEN_DEFAULT_FIELD environment variable.
     pub default_field: Option<String>,
+    /// Opt-in read-only exact UUID lookup (0.22+). Refuses names, scoped
+    /// organization/collection configuration and writes instead of listing
+    /// unrelated items. The default search/batch behavior is unchanged.
+    #[serde(default)]
+    pub exact_item_ids: bool,
 }
 
 impl TryFrom<&ProviderUrl> for BitwardenConfig {
@@ -437,13 +442,19 @@ impl TryFrom<&ProviderUrl> for BitwardenConfig {
                 "folder" => config.folder_prefix = Some(value.into_owned()),
                 "type" => config.default_item_type = Some(parse_item_type(&value, "?type=")?),
                 "field" => config.default_field = Some(value.into_owned()),
+                "lookup" if value == "id" => config.exact_item_ids = true,
+                "lookup" => {
+                    return Err(SecretSpecError::ProviderOperationFailed(
+                        "Bitwarden lookup must be id".into(),
+                    ));
+                }
                 unknown => {
                     // Ignoring these made `?feild=api_key` a silent no-op: the
                     // address looked accepted and the secret came back from
                     // whatever the default field was.
                     return Err(SecretSpecError::ProviderOperationFailed(format!(
                         "Unknown Bitwarden URI parameter '{unknown}'. Valid parameters are \
-                         org (or organization), collection, server, folder, type, and field."
+                         org (or organization), collection, server, folder, type, field, and lookup."
                     )));
                 }
             }
@@ -1689,6 +1700,26 @@ impl BitwardenProvider {
         item_name: &str,
         field_hint: Option<&str>,
     ) -> Result<Option<SecretBytes>> {
+        if self.config.exact_item_ids {
+            let id = item_id_reference(item_name).ok_or_else(|| {
+                SecretSpecError::ProviderOperationFailed(
+                    "Bitwarden lookup=id requires an exact item UUID".into(),
+                )
+            })?;
+            if self.requested_org().is_some() || self.requested_collection().is_some() {
+                return Err(SecretSpecError::ProviderOperationFailed(
+                    "Bitwarden lookup=id does not support organization/collection scope".into(),
+                ));
+            }
+            self.require_authenticated()?;
+            let item: BitwardenItem = serde_json::from_value(self.get_item_as_template(&id)?)?;
+            if !item.id.eq_ignore_ascii_case(&id) {
+                return Err(SecretSpecError::ProviderOperationFailed(
+                    "bw get item returned a different item identity".into(),
+                ));
+            }
+            return self.extract_value_from_item(&item, field_hint);
+        }
         self.require_authenticated()?;
 
         // An item UUID bypasses `--search`: bw's fuzzy matcher does not search
@@ -2840,6 +2871,9 @@ impl Provider for BitwardenProvider {
             params.push(format!("server={}", ProviderUrl::encode_query(server)));
         }
 
+        if self.config.exact_item_ids {
+            params.push("lookup=id".into());
+        }
         if !params.is_empty() {
             uri.push('?');
             uri.push_str(&params.join("&"));
@@ -2906,6 +2940,28 @@ impl Provider for BitwardenProvider {
             resolved.push((*name, self.resolve_coords(*addr)?));
         }
 
+        // Selected UUID-only batches must not materialize unrelated vault
+        // items merely because the resolver uses its batch interface.
+        if self.config.exact_item_ids {
+            if resolved
+                .iter()
+                .any(|(_, coords)| item_id_reference(&coords.item).is_none())
+            {
+                return Err(SecretSpecError::ProviderOperationFailed(
+                    "Bitwarden lookup=id requires exact item UUIDs".into(),
+                ));
+            }
+            let mut found = HashMap::with_capacity(resolved.len());
+            for (name, coords) in &resolved {
+                if let Some(value) =
+                    self.get_from_password_manager(&coords.item, coords.field.as_deref())?
+                {
+                    found.insert((*name).to_owned(), value);
+                }
+            }
+            return Ok(found);
+        }
+
         let items = self.listed_vault()?;
         let mut found = HashMap::with_capacity(resolved.len());
         for (name, coords) in &resolved {
@@ -2932,13 +2988,32 @@ impl Provider for BitwardenProvider {
     /// * `Ok(())` - Secret stored successfully
     /// * `Err(_)` - Storage or authentication error
     fn set(&self, addr: Address<'_>, value: &SecretBytes) -> Result<()> {
+        if self.config.exact_item_ids {
+            return Err(SecretSpecError::ProviderOperationFailed(
+                "Bitwarden lookup=id is a selected read-only mode".into(),
+            ));
+        }
         let coords = self.resolve_coords(addr)?;
         let item_name = &coords.item;
         let target_field = coords.field.as_deref();
         self.set_to_password_manager(item_name, target_field, value)
     }
 
+    fn check_writable(&self, _addr: Address<'_>) -> Result<()> {
+        if self.config.exact_item_ids {
+            return Err(SecretSpecError::ProviderOperationFailed(
+                "Bitwarden lookup=id is read-only".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn reflect(&self, context: DiscoveryContext<'_>) -> Result<HashMap<String, Secret>> {
+        if self.config.exact_item_ids {
+            return Err(SecretSpecError::ProviderOperationFailed(
+                "Bitwarden lookup=id does not support vault reflection".into(),
+            ));
+        }
         let items = self.listed_vault()?;
         declarations_from_items(
             &items,
@@ -5399,6 +5474,74 @@ mod tests {
                 "an item UUID must bypass bw's non-ID search: {log}"
             );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uuid_only_batch_never_lists_unrelated_vault_items() {
+        let id = "22222222-2222-2222-2222-222222222222";
+        let fake = FakeBw::new().with_items(json!([
+            { "id": id, "name": "Selected", "type": 1, "login": {"password": "disposable-selected"} },
+            { "id": "11111111-1111-1111-1111-111111111111", "name": "Unrelated", "type": 1, "login": {"password": "must-not-fetch"} }
+        ]));
+        fake.run(|| {
+            let provider = BitwardenProvider::new(BitwardenConfig {
+                exact_item_ids: true,
+                ..Default::default()
+            });
+            let address = crate::NativeAddress {
+                item: id.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                provider
+                    .get(Address::Native(&address))
+                    .unwrap()
+                    .unwrap()
+                    .expose_secret(),
+                b"disposable-selected"
+            );
+            let result = provider
+                .get_many(&[("TOKEN", Address::Native(&address))])
+                .unwrap();
+            assert_eq!(result["TOKEN"].expose_secret(), b"disposable-selected");
+            let log = fake.invocations();
+            assert!(
+                !log.contains("<list>"),
+                "exact selected batches must not list vault items: {log}"
+            );
+            assert!(log.contains("<get> <item>"));
+        });
+    }
+
+    #[test]
+    fn exact_id_lookup_round_trips_and_rejects_broad_or_write_operations() {
+        let parsed = config_from_spec("bw://?lookup=id");
+        assert!(parsed.exact_item_ids);
+        let provider = BitwardenProvider::new(parsed);
+        assert!(provider.uri().contains("lookup=id"));
+        let address = Address::convention("project", "default", "TOKEN");
+        assert!(provider.get(address).is_err());
+        assert!(provider.check_writable(address).is_err());
+        assert!(
+            provider
+                .set(address, &SecretBytes::from_slice(b"disposable"))
+                .is_err()
+        );
+        assert!(
+            provider
+                .reflect(DiscoveryContext {
+                    project: "project",
+                    profile: "default"
+                })
+                .is_err()
+        );
+        assert!(
+            BitwardenConfig::try_from(&ProviderUrl::new(
+                url::Url::parse("bw://?lookup=typo").unwrap()
+            ))
+            .is_err()
+        );
     }
 
     /// One listing regardless of batch size; the default lists once per request.

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bitwarden Password Manager: opt into read-only `lookup=id` to fetch exact unscoped UUIDs without listing unrelated vault items (0.22+).
+
 ### Added
 
 - Provider reads now retry recognized transient failures with bounded exponential
